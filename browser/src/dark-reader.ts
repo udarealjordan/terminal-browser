@@ -6,6 +6,7 @@ const SCRIPT_ASSET = "darkreader/darkreader.js";
 const WORLD = "terminal-browser-dark-reader";
 
 const START_WHEN_HEAD_EXISTS = `() => {
+  DarkReader.setFetchMethod((url) => fetch(url));
   const start = () => DarkReader.auto({});
   if (document.head) return start();
   new MutationObserver((_, observer) => {
