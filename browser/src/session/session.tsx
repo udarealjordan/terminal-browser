@@ -264,7 +264,7 @@ class Session {
   private records = new Map<number, RecordSession>();
   private grabs = new Map<number, Grab>();
   private copyWatchers = new Map<number, CopyOnSelect>();
-  private darkReaders = new Map<number, DarkReader>();
+  private darkReaders = new WeakMap<WebViewHandle, DarkReader>();
   private readonly copyOnSelect: boolean;
   private readonly agentPanes: AgentPaneFinder;
   private shownRecord: RecordSession | null = null;
@@ -324,9 +324,6 @@ class Session {
             if (this.tabs.has(id)) continue;
             watcher.dispose();
             this.copyWatchers.delete(id);
-          }
-          for (const id of [...this.darkReaders.keys()]) {
-            if (!this.tabs.has(id)) this.darkReaders.delete(id);
           }
         },
         onActiveState: (state, urlChanged) => {
@@ -1352,16 +1349,11 @@ class Session {
 
   private syncDarkReaders(): void {
     const enabled = this.settings.get("pages.darkReader") === "on";
-    for (const tab of this.tabs.all()) {
-      const handle = tab.ref.current;
+    for (const { ref } of this.tabs.all()) {
+      const handle = ref.current;
       if (!handle) continue;
-      let reader = this.darkReaders.get(tab.id);
-      if (!reader) {
-        if (!enabled) continue;
-        reader = new DarkReader(handle);
-        this.darkReaders.set(tab.id, reader);
-      }
-      reader.set(enabled);
+      if (!this.darkReaders.has(handle)) this.darkReaders.set(handle, new DarkReader(handle));
+      this.darkReaders.get(handle)!.set(enabled);
     }
   }
 
