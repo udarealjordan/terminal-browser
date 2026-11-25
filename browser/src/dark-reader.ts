@@ -1,60 +1,93 @@
 import fs from "node:fs";
-import type { WebViewHandle } from "@zenbu-labs/pixel";
+import { ipcMain, type WebContents, type WebFrameMain } from "electron";
 import { bundledAsset } from "./assets";
 
-const WORLD = "terminal-browser-dark-reader";
+const SYNC = "dark-reader:sync";
+const FETCH = "dark-reader:fetch";
+const DETECTED = "dark-reader:detected";
+const WORLD_ID = 1014;
 
-const START_WHEN_HEAD_EXISTS = `() => {
-  DarkReader.setFetchMethod(fetch);
-  const start = () => DarkReader.auto({});
-  if (document.head) return start();
-  new MutationObserver((_, observer) => {
-    if (!document.head) return;
-    observer.disconnect();
-    start();
-  }).observe(document, { childList: true, subtree: true });
-}`;
-
-let source: string | null = null;
-function darkReaderSource(): string {
-  if (source) return source;
-  const file = bundledAsset("darkreader/darkreader.js");
-  if (!file) throw new Error("darkreader bundle missing from assets (run pnpm install)");
-  return (source = `${fs.readFileSync(file, "utf8")}\n;(${START_WHEN_HEAD_EXISTS})();`);
+interface Sites {
+  isDarkSite(url: string): boolean;
+  fixesFor(url: string): unknown[] | null;
+  detectorHintsFor(url: string): { iframe?: boolean }[] | null;
 }
 
-type FrameTree = { frame: { id: string }; childFrames?: FrameTree[] };
-const frameIds = (tree: FrameTree): string[] => [tree.frame.id, ...(tree.childFrames ?? []).flatMap(frameIds)];
-
-// follows the page's prefers-color-scheme, which is emulated from the terminal background
-export class DarkReader {
-  private scriptId: string | null = null;
-  private queue = Promise.resolve();
-
-  constructor(private readonly view: WebViewHandle) {}
-
-  set(enabled: boolean): void {
-    this.queue = this.queue.then(() => (enabled ? this.install() : this.uninstall())).catch(() => {});
-  }
-
-  private async install(): Promise<void> {
-    if (this.scriptId) return;
-    const { identifier } = await this.view.cdp("Page.addScriptToEvaluateOnNewDocument", {
-      source: darkReaderSource(),
-      worldName: WORLD,
-      runImmediately: true,
-    });
-    this.scriptId = identifier as string;
-  }
-
-  private async uninstall(): Promise<void> {
-    if (!this.scriptId) return;
-    await this.view.cdp("Page.removeScriptToEvaluateOnNewDocument", { identifier: this.scriptId });
-    this.scriptId = null;
-    const { frameTree } = await this.view.cdp("Page.getFrameTree");
-    for (const frameId of frameIds(frameTree as FrameTree)) {
-      const { executionContextId } = await this.view.cdp("Page.createIsolatedWorld", { frameId, worldName: WORLD });
-      await this.view.cdp("Runtime.evaluate", { expression: "globalThis.DarkReader?.auto(false)", contextId: executionContextId });
-    }
-  }
+function asset(name: string): string {
+  const file = bundledAsset(`darkreader/${name}`);
+  if (!file) throw new Error(`darkreader bundle missing: assets/darkreader/${name} (run pnpm install)`);
+  return file;
 }
+
+let sites: Sites | null = null;
+let pageSource: string | null = null;
+const owners = new Set<(contents: WebContents) => boolean | null>();
+const darkThemeDetectedAt = new WeakMap<WebContents, string>();
+
+function wanted(contents: WebContents): boolean {
+  for (const owner of owners) {
+    const answer = owner(contents);
+    if (answer !== null) return answer;
+  }
+  return false;
+}
+
+function themeFor(contents: WebContents, frame: WebFrameMain) {
+  const tabUrl = frame.top?.url ?? frame.url;
+  if (!wanted(contents) || !/^https?:/.test(frame.url)) return null;
+  sites ??= require(asset("sites.js")) as Sites;
+  if (sites.isDarkSite(tabUrl) || darkThemeDetectedAt.get(contents) === tabUrl) return null;
+  const detectorHints = sites.detectorHintsFor(frame.url);
+  return {
+    fixes: sites.fixesFor(frame.url),
+    detectDarkTheme: frame === frame.top || Boolean(detectorHints?.some((hint) => hint.iframe)),
+    detectorHints,
+  };
+}
+
+ipcMain.on(SYNC, (event, loaded: boolean) => {
+  const theme = event.senderFrame && themeFor(event.sender, event.senderFrame);
+  if (!theme) return void (event.returnValue = null);
+  pageSource ??= fs.readFileSync(asset("page.js"), "utf8");
+  event.returnValue = { source: loaded ? null : pageSource, theme };
+});
+
+ipcMain.handle(FETCH, async (event, url: string) => {
+  const response = await event.sender.session.fetch(url, { credentials: "omit" });
+  if (!response.ok) throw new Error(`${response.status}: ${response.statusText}`);
+  return { body: await response.arrayBuffer(), type: response.headers.get("content-type") ?? "" };
+});
+
+ipcMain.on(DETECTED, (event) => {
+  const tabUrl = event.senderFrame?.top?.url;
+  if (!tabUrl) return;
+  darkThemeDetectedAt.set(event.sender, tabUrl);
+  refreshDarkReader(event.sender);
+});
+
+export function registerDarkReader(owner: (contents: WebContents) => boolean | null): () => void {
+  owners.add(owner);
+  return () => owners.delete(owner);
+}
+
+export function refreshDarkReader(contents: WebContents): void {
+  for (const frame of contents.mainFrame.framesInSubtree) frame.send(SYNC);
+}
+
+export const DARK_READER_PRELOAD = `
+  webFrame.setIsolatedWorldInfo(${WORLD_ID}, { name: "terminal-browser-dark-reader" });
+  contextBridge.exposeInIsolatedWorld(${WORLD_ID}, "terminalBrowserDarkReader", {
+    fetch: (url) => ipcRenderer.invoke(${JSON.stringify(FETCH)}, url),
+    darkThemeDetected: () => ipcRenderer.send(${JSON.stringify(DETECTED)}),
+  });
+  let darkReaderLoaded = false;
+  const syncDarkReader = () => {
+    const reply = ipcRenderer.sendSync(${JSON.stringify(SYNC)}, darkReaderLoaded);
+    if (!reply && !darkReaderLoaded) return;
+    const code = reply ? \`\${reply.source ?? ""};darkReader.apply(\${JSON.stringify(reply.theme)})\` : "darkReader.remove()";
+    darkReaderLoaded = true;
+    void webFrame.executeJavaScriptInIsolatedWorld(${WORLD_ID}, [{ code }]);
+  };
+  syncDarkReader();
+  ipcRenderer.on(${JSON.stringify(SYNC)}, syncDarkReader);
+`;
