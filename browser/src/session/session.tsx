@@ -44,6 +44,7 @@ import type {
 } from "shared";
 import { bundledAsset } from "../assets";
 import { CopyOnSelect, Grab, reactGrabPreloadPath } from "../grab/grab";
+import { DarkReader } from "../dark-reader";
 import type { GrabRegion } from "../grab/grab";
 import { grabScreenshot } from "../grab/screenshot";
 import { AgentPaneFinder } from "../grab/target";
@@ -192,7 +193,10 @@ class Session {
   private readonly settings = new SettingsManager(
     {
       requestRender: () => this.render(),
-      settingsChanged: () => this.applyRenderSettings(),
+      settingsChanged: () => {
+        this.applyRenderSettings();
+        this.syncDarkReaders();
+      },
       toast: (text, state) => this.showToast(text, state),
       setClipboard: (text) => this.root?.setClipboard(text),
       overlayOpened: () => this.enterOverlay([]),
@@ -260,6 +264,7 @@ class Session {
   private records = new Map<number, RecordSession>();
   private grabs = new Map<number, Grab>();
   private copyWatchers = new Map<number, CopyOnSelect>();
+  private darkReaders = new Map<number, DarkReader>();
   private readonly copyOnSelect: boolean;
   private readonly agentPanes: AgentPaneFinder;
   private shownRecord: RecordSession | null = null;
@@ -320,10 +325,14 @@ class Session {
             watcher.dispose();
             this.copyWatchers.delete(id);
           }
+          for (const id of [...this.darkReaders.keys()]) {
+            if (!this.tabs.has(id)) this.darkReaders.delete(id);
+          }
         },
         onActiveState: (state, urlChanged) => {
           if (urlChanged) rememberUrl(state.url);
           this.ensureCopyWatcher();
+          this.syncDarkReaders();
           const zoomed = Math.abs(state.zoom - this.lastZoom) > 0.001;
           if (zoomed && this.pageMenu?.kind !== "toolbar") this.showZoomHud(state.zoom);
           this.lastZoom = state.zoom;
@@ -1339,6 +1348,21 @@ class Session {
     });
     this.copyWatchers.set(tab.id, watcher);
     void watcher.enable();
+  }
+
+  private syncDarkReaders(): void {
+    const enabled = this.settings.get("pages.darkReader") === "on";
+    for (const tab of this.tabs.all()) {
+      const handle = tab.ref.current;
+      if (!handle) continue;
+      let reader = this.darkReaders.get(tab.id);
+      if (!reader) {
+        if (!enabled) continue;
+        reader = new DarkReader(handle);
+        this.darkReaders.set(tab.id, reader);
+      }
+      reader.set(enabled);
+    }
   }
 
   private grabFor(tab: Tab, handle: WebViewHandle): Grab {
