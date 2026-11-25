@@ -1,23 +1,27 @@
 // Builds the parts of the Dark Reader extension that its npm package leaves out:
 // per-site fixes, the list of already dark sites, and detection of sites that ship their own dark theme
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 const VERSION = "4.9.135";
+const COMMIT = "dbf2a1029131280d9dab21ed29f1dfdeb51a6cc7";
+const TARBALL_SHA256 = "45045c84999be054f4b35dd6bb430231fb9ace5adcdfb6f394665eedf4c7e7a2";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SOURCE = path.join(ROOT, "node_modules", ".cache", `darkreader-${VERSION}`);
 const OUT = path.join(ROOT, "assets", "darkreader");
 
 if (!fs.existsSync(SOURCE)) {
-  const response = await fetch(`https://codeload.github.com/darkreader/darkreader/tar.gz/refs/tags/v${VERSION}`);
+  const response = await fetch(`https://codeload.github.com/darkreader/darkreader/tar.gz/${COMMIT}`);
   if (!response.ok) throw new Error(`darkreader source download failed: ${response.status}`);
+  const tarball = Buffer.from(await response.arrayBuffer());
+  const sha256 = createHash("sha256").update(tarball).digest("hex");
+  if (sha256 !== TARBALL_SHA256) throw new Error(`darkreader source checksum mismatch: got ${sha256}`);
   fs.mkdirSync(SOURCE, { recursive: true });
-  const untar = spawnSync("tar", ["xz", "--strip-components=1", "-C", SOURCE], {
-    input: Buffer.from(await response.arrayBuffer()),
-  });
+  const untar = spawnSync("tar", ["xz", "--strip-components=1", "-C", SOURCE], { input: tarball });
   if (untar.status !== 0) {
     fs.rmSync(SOURCE, { recursive: true, force: true });
     throw new Error(`darkreader source extract failed: ${untar.stderr}`);
@@ -31,10 +35,7 @@ import { DEFAULT_THEME } from "./defaults";
 import { createOrUpdateDynamicTheme, removeDynamicTheme } from "./inject/dynamic-theme";
 import { runDarkThemeDetector, stopDarkThemeDetector } from "./inject/detector";
 
-setFetchMethod(async (url) => {
-  const { body, type } = await terminalBrowserDarkReader.fetch(url);
-  return new Response(body, { headers: { "content-type": type } });
-});
+setFetchMethod((url) => fetch(url));
 
 function whenDocumentExists(run) {
   if (document.documentElement) return run();

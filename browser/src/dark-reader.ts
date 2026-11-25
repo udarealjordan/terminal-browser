@@ -3,7 +3,6 @@ import { ipcMain, type WebContents, type WebFrameMain } from "electron";
 import { bundledAsset } from "./assets";
 
 const SYNC = "dark-reader:sync";
-const FETCH = "dark-reader:fetch";
 const DETECTED = "dark-reader:detected";
 const WORLD_ID = 1014;
 
@@ -52,12 +51,6 @@ ipcMain.on(SYNC, (event, loaded: boolean) => {
   event.returnValue = { source: loaded ? null : pageSource, theme };
 });
 
-ipcMain.handle(FETCH, async (event, url: string) => {
-  const response = await event.sender.session.fetch(url, { credentials: "omit" });
-  if (!response.ok) throw new Error(`${response.status}: ${response.statusText}`);
-  return { body: await response.arrayBuffer(), type: response.headers.get("content-type") ?? "" };
-});
-
 ipcMain.on(DETECTED, (event) => {
   const tabUrl = event.senderFrame?.top?.url;
   if (!tabUrl) return;
@@ -77,7 +70,6 @@ export function refreshDarkReader(contents: WebContents): void {
 export const DARK_READER_PRELOAD = `
   webFrame.setIsolatedWorldInfo(${WORLD_ID}, { name: "terminal-browser-dark-reader" });
   contextBridge.exposeInIsolatedWorld(${WORLD_ID}, "terminalBrowserDarkReader", {
-    fetch: (url) => ipcRenderer.invoke(${JSON.stringify(FETCH)}, url),
     darkThemeDetected: () => ipcRenderer.send(${JSON.stringify(DETECTED)}),
   });
   let darkReaderLoaded = false;
